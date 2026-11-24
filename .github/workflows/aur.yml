@@ -1,0 +1,76 @@
+# When PKGBUILD/.SRCINFO change on master (a merged Renovate PR), copy them into
+# the AUR repo and push. The AUR rejects subdirectories, so this repo's extra
+# files (.github/, renovate.json, ...) never go there.
+name: Publish to AUR
+
+on:
+  push:
+    branches: [master]
+    paths: [PKGBUILD, .SRCINFO]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aur-publish
+  cancel-in-progress: false
+
+env:
+  AUR_PKG: azure-functions-core-tools-bin
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git openssh
+
+      - uses: actions/checkout@v4
+
+      - name: Check .SRCINFO matches PKGBUILD
+        run: |
+          useradd -m builder
+          install -d -o builder /home/builder/pkg
+          cp PKGBUILD /home/builder/pkg/
+          cd /home/builder/pkg
+          sudo -u builder makepkg --printsrcinfo | diff -u "$GITHUB_WORKSPACE/.SRCINFO" -
+
+      - name: Copy into the AUR repo
+        id: aur
+        run: |
+          git clone "https://aur.archlinux.org/${AUR_PKG}.git" /tmp/aur
+          cp PKGBUILD .SRCINFO /tmp/aur/
+          cd /tmp/aur
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR is already up to date"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push to AUR
+        if: steps.aur.outputs.changed == 'true'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "::error::The AUR_SSH_PRIVATE_KEY secret is not set"; exit 1
+          fi
+          # ssh reads root's real home, not the container's $HOME
+          install -dm700 /root/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > /root/.ssh/aur
+          chmod 600 /root/.ssh/aur
+          cat > /root/.ssh/known_hosts <<'EOF'
+          aur.archlinux.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuBKrPzbawxA/k2g6NcyV5jmqwJ2s+zpgZGZ7tpLIcN
+          aur.archlinux.org ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBLMiLrP8pVi5BFX2i3vepSUnpedeiewE5XptnUnau+ZoeUOPkpoCgZZuYfpaIQfhhJJI5qgnjJmr4hyJbe/zxow=
+          EOF
+          export GIT_SSH_COMMAND="ssh -i /root/.ssh/aur -o IdentitiesOnly=yes -o UserKnownHostsFile=/root/.ssh/known_hosts -o StrictHostKeyChecking=yes"
+
+          ver=$(grep -Po '^pkgver=\K[^ #]+' PKGBUILD)-$(grep -Po '^pkgrel=\K\S+' PKGBUILD)
+          cd /tmp/aur
+          git -c user.name="${{ github.actor }}" \
+              -c user.email="${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com" \
+              commit -m "Update to ${ver}"
+          git push "ssh://aur@aur.archlinux.org/${AUR_PKG}.git" HEAD:master

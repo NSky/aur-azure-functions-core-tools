@@ -1,0 +1,14 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Upstream version in PKGBUILD (see the '# renovate:' comment on pkgver)",
+      "managerFilePatterns": ["/(^|/)PKGBUILD$/"],
+      "matchStrings": [
+        "pkgver=(?<currentValue>\\S+)\\s*# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)"
+      ]
+    }
+  ]
+}

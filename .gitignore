@@ -1,0 +1,10 @@
+# makepkg output
+/src/
+/pkg/
+*.zip
+*.pkg.tar*
+*.log
+
+# graft (local code index)
+/graft/
+/.ignore

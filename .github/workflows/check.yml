@@ -1,0 +1,72 @@
+# On a Renovate PR (which only bumps pkgver): reset pkgrel, recompute b2sums,
+# regenerate .SRCINFO, build the package, check `func --version`, and commit the
+# fixed PKGBUILD/.SRCINFO back to the PR branch. Run it by hand to test master.
+name: Check package
+
+on:
+  pull_request:
+    paths: [PKGBUILD]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: check-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # Only branches in this repo (Renovate's); a fork's PR branch can't be pushed to.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git pacman-contrib
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Reset pkgrel on a version bump
+        if: github.event_name == 'pull_request'
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          old=$(git show "origin/${{ github.base_ref }}:PKGBUILD" | grep -Po '^pkgver=\K[^ #]+')
+          new=$(grep -Po '^pkgver=\K[^ #]+' PKGBUILD)
+          if [ "$old" != "$new" ]; then sed -i -E 's/^pkgrel=.*/pkgrel=1/' PKGBUILD; fi
+
+      - name: Update checksums and .SRCINFO, build
+        run: |
+          # makepkg refuses to run as root
+          useradd -m builder
+          install -d -o builder /home/builder/pkg
+          cp PKGBUILD /home/builder/pkg/
+          cd /home/builder/pkg
+          sudo -u builder updpkgsums
+          sudo -u builder makepkg --printsrcinfo > .SRCINFO
+          sudo -u builder env PKGEXT=.pkg.tar makepkg -f --noconfirm
+          cp PKGBUILD .SRCINFO "$GITHUB_WORKSPACE/"
+
+      - name: Check func --version
+        env:
+          DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: '1'
+          FUNCTIONS_CORE_TOOLS_TELEMETRY_OPTOUT: '1'
+        run: |
+          want=$(grep -Po '^pkgver=\K[^ #]+' PKGBUILD)
+          got=$(/home/builder/pkg/pkg/azure-functions-core-tools-bin/usr/lib/azure-functions-core-tools/func --version | tail -1)
+          echo "func --version: $got (expected $want)"
+          [ "$got" = "$want" ]
+
+      - name: Commit checksums and .SRCINFO to the PR
+        if: github.event_name == 'pull_request'
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then echo "Nothing to commit"; exit 0; fi
+          git commit -m "Update checksums and .SRCINFO"
+          git push
